@@ -103,29 +103,23 @@ class LDSRead(object):
         pass
     
     @classmethod
-    def getInfo(cls,lid):
+    def getInfo(cls,lid,fields=('group', 'version', 'metadata')):
         '''Get layer info page''' 
         content = StaticFetch.get(INF.format(lid=lid),korb=cls.korb).read().decode()
         try:
-            dic = json.loads(content)
+            data = json.loads(content)
         except:
-            dic = ast.literal_eval(content)
+            data = ast.literal_eval(content)
         #return a subset of the info
-        return {k: dic.get(k, None) for k in ('group', 'version', 'metadata')}
+        return {k: data.get(k, None) for k in fields}
     
     @staticmethod
-    def drill(dic,pth):
+    def drill(data,pth):
         '''Trace a defined dict path which may be incomplete'''
-        #print (pth,'##',dic)
-        if pth and isinstance(dic,dict) and pth[0] in dic: 
-            return LDSRead.drill(dic[pth[0]],pth[1:])
-        else: return not len(pth),dic
-    
-    @classmethod
-    def getVerURL(cls,lid): 
-        '''Get the latest metadata version number''' 
-        v = cls.getInfo(lid)
-        return v['url']
+        #print (pth,'##',data)
+        if pth and isinstance(data,dict) and pth[0] in data: 
+            return LDSRead.drill(data[pth[0]],pth[1:])
+        else: return not len(pth),data
     
     def idlist(self,url):
         '''Simple id extract from getcaps'''
@@ -155,11 +149,38 @@ class LDSRead(object):
         #retries expired so...
         return ret
     
+    def _getNextPageURL(self,headers,hstr='Link',extr='page-next'):
+        '''Fairly specific next-page finder extracts url from headers'''
+        #find 'link'
+        url_str = [h for h in headers._headers if h[0]==hstr]
+        if not url_str: return None
+        #find 'page-next'
+        nxp_str = [s.strip() for s in url_str[0][1].split(',') if re.search(extr,s)]
+        if not nxp_str: return None
+        #extract url part
+        nxp_sch = re.search('<(.*)>',nxp_str[0])
+        return nxp_sch.group(1) if nxp_sch else None
+    
+    def getPage(self,url):
+        '''Gets a requested page and checks header of additional pages'''
+        response = StaticFetch.get(url,korb=self.korb)
+        nxt = self._getNextPageURL(response.info())
+        content = response.read().decode()
+        data = json.loads(content)
+        return data,nxt
+    
+    def getMulti(self,url):
+        data = []
+        while url:
+            d,url = self.getPage(url)
+            data += d
+        return data
+        
     def getids(self):
-        k = Authentication.apikey(self.korb['kfile'])
-        cap1 = CAP.format(key=k,svc='wfs',ver=WFSv)
-        cap2 = CAP.format(key=k,svc='wms',ver=WMSv)
-        return self.idlist(cap1),self.idlist(cap2)
+        cap = 'https://data.linz.govt.nz/services/api/v1/layers/'
+        data = self.getMulti(cap)
+        ids = [i['id'] for i in data]
+        return ids
     
     @classmethod
     def readurl(cls,lid):
@@ -213,13 +234,13 @@ def transform(ident, hydroreader, fnxsl = 's1.xsl'):
 def parse(res):
     '''parse the result to a dict and extract colnames and their values'''
     try:
-        dic = json.loads(res)
+        data = json.loads(res)
     except:
-        dic = ast.literal_eval(res)
+        data = ast.literal_eval(res)
     #eval DQ escapes get deleted in processing so put SQL3 escapes in
-    dic = {k:v.replace('"','""') for k,v in dic.items()}
-    colnames = ','.join(dic.keys())
-    colvals = ','.join(['"{}"'.format(str(i)) for i in dic.values()])
+    data = {k:v.replace('"','""') for k,v in data.items()}
+    colnames = ','.join(data.keys())
+    colvals = ','.join(['"{}"'.format(str(i)) for i in data.values()])
     return colnames,colvals
 
 def main():
@@ -228,12 +249,10 @@ def main():
     if 'METAFILTER' not in globals(): METAFILTER = None
     sq = SQL3DB()
     lds = LDSRead()
-    wfsx,wmsx = lds.getids()
-    for lid,_ in wfsx['layer']+wmsx['layer']:
-    #for lid in [51779,50789,51247,51402,51779,]:
+
+    for lid in lds.getids():
         print(lid)
-        #res = transform(ident=filename,hydroreader=readfile,fnxsl='s6.xsl')
-        res = transform(ident=lid,hydroreader=lds.readurl,fnxsl='s6.xsl')
+        res = transform(ident=lid,hydroreader=lds.readurl,fnxsl='csvconvert.xsl')
         if res: sq.populate(lid,*parse(str(res)))
 
     sq.output()

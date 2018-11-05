@@ -11,7 +11,7 @@ import difflib
 import sqlite3
 import json
 from lxml import etree
-from LDSAPI import StaticFetch, Authentication
+from LDSAPI import StaticFetch, Authentication, LDSAPI
 from six.moves.urllib.error import HTTPError
 
 XST = 'https://data.linz.govt.nz/layer/{id}/metadata/iso/xml/'
@@ -121,62 +121,24 @@ class LDSRead(object):
             return LDSRead.drill(data[pth[0]],pth[1:])
         else: return not len(pth),data
     
-    def idlist(self,url):
-        '''Simple id extract from getcaps'''
-        retry = 5
-        ret = {'layer':(),'table':()}
-        while retry:
-            try:
-                content = StaticFetch.get(url,korb=self.korb)
-                text = content.read()
-                tree = etree.fromstring(text, parser=self.parser)
-                for ft in tree.findall(FTX, namespaces=NSX):
-                    #\d+ finds either v:x-NNN or layer-NNN but also table-NNN
-                    if CAPSFILTER and not any([re.search(CAPSFILTER,t.text) for t in ft.findall(HPTH, namespaces=NSX)]):
-                        continue
-                    match = re.search('(layer|table)-(\d+)',ft.find(NPTH, namespaces=NSX).text)
-                    lort = match.group(1)
-                    name = int(match.group(2))
-                    title = ft.find(TPTH, namespaces=NSX).text
-                    ret[lort] += ((name,title),)
-                #return layer not table...
-                return ret
-            except HTTPError as he:
-                print('RETRY',retry,str(he)[:1000])
-                retry -= 1
-            except Exception as e:
-                print(e)
-        #retries expired so...
-        return ret
-    
-    def _getNextPageURL(self,headers,hstr='Link',extr='page-next'):
-        '''Fairly specific next-page finder extracts url from headers'''
-        #find 'link'
-        url_str = [h for h in headers._headers if h[0]==hstr]
-        if not url_str: return None
-        #find 'page-next'
-        nxp_str = [s.strip() for s in url_str[0][1].split(',') if re.search(extr,s)]
-        if not nxp_str: return None
-        #extract url part
-        nxp_sch = re.search('<(.*)>',nxp_str[0])
-        return nxp_sch.group(1) if nxp_sch else None
-    
-    def getPage(self,url):
-        '''Gets a requested page and checks header of additional pages'''
+    def _getPageNext(self,url):
+        '''Gets a requested page and checks header for additional pages'''
         response = StaticFetch.get(url,korb=self.korb)
-        nxt = self._getNextPageURL(response.info())
+        pagenext = LDSAPI.parseHeaders(response.info())['page-next']['u']
         content = response.read().decode()
         data = json.loads(content)
-        return data,nxt
+        return data,pagenext
     
     def getMulti(self,url):
+        '''Fetch a sequence of pages while "page-next" URL is returned'''
         data = []
         while url:
-            d,url = self.getPage(url)
+            d,url = self._getPageNext(url)
             data += d
         return data
         
     def getids(self):
+        '''Use Kx API to get a list of layer IDs'''
         cap = 'https://data.linz.govt.nz/services/api/v1/layers/'
         data = self.getMulti(cap)
         ids = [i['id'] for i in data]
